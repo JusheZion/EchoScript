@@ -6,10 +6,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, Square, AlertCircle } from 'lucide-react';
 import Button from './Button';
-import { AudioData } from '../types';
+import { AudioSource } from '../types';
 
 interface AudioRecorderProps {
-  onAudioCaptured: (audioData: AudioData) => void;
+  onAudioCaptured: (audioSource: AudioSource) => void;
   disabled?: boolean;
 }
 
@@ -41,10 +41,11 @@ const AudioRecorder: React.FC<AudioRecorderProps> = ({ onAudioCaptured, disabled
 
       mediaRecorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        
+
         onAudioCaptured({
+          kind: 'blob',
           blob,
-          base64: '',
+          name: 'recording.webm',
           mimeType: 'audio/webm'
         });
         

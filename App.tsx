@@ -4,24 +4,45 @@
 */
 
 import React, { useState, useEffect } from 'react';
-import { Mic, Upload, Sparkles, AlertTriangle, Moon, Sun, Download, Copy, Check } from 'lucide-react';
+import { Mic, Upload, Sparkles, AlertTriangle, Moon, Sun, Download, Copy, Check, KeyRound } from 'lucide-react';
 import { PDFDownloadLink } from '@react-pdf/renderer';
+import { invoke } from '@tauri-apps/api/core';
 import AudioRecorder from './components/AudioRecorder';
 import FileUploader from './components/FileUploader';
 import TranscriptionDisplay from './components/TranscriptionDisplay';
 import TranscriptPDF from './components/TranscriptPDF';
 import Button from './components/Button';
+import ApiKeySettings from './components/ApiKeySettings';
 import { transcribeAudio } from './services/geminiService';
-import { AppStatus, AudioData, TranscriptionResponse } from './types';
+import { AppStatus, AudioSource, TranscriptionResponse } from './types';
 
 function App() {
   const [mode, setMode] = useState<'record' | 'upload'>('record');
   const [status, setStatus] = useState<AppStatus>('idle');
-  const [audioData, setAudioData] = useState<AudioData | null>(null);
+  const [audioSource, setAudioSource] = useState<AudioSource | null>(null);
   const [result, setResult] = useState<TranscriptionResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  
+
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
+  const [keySettingsMode, setKeySettingsMode] = useState<'onboarding' | 'manage' | null>(null);
+
+  const refreshApiKeyStatus = async () => {
+    try {
+      const has = await invoke<boolean>('has_gemini_api_key');
+      setHasApiKey(has);
+      if (!has) setKeySettingsMode('onboarding');
+    } catch (err) {
+      console.error('Failed to check API key status:', err);
+      setHasApiKey(false);
+      setKeySettingsMode('onboarding');
+    }
+  };
+
+  useEffect(() => {
+    refreshApiKeyStatus();
+  }, []);
+
   // Initialize dark mode based on system preference
   const [isDarkMode, setIsDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -41,31 +62,31 @@ function App() {
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
 
-  const handleAudioReady = (data: AudioData) => {
-    setAudioData(data);
+  const handleAudioReady = (source: AudioSource) => {
+    setAudioSource(source);
     setError(null);
     setResult(null); // Clear previous results
   };
 
   const handleTranscribe = async () => {
-    if (!audioData) return;
+    if (!audioSource) return;
 
     setStatus('processing');
     setError(null);
 
     try {
-      const data = await transcribeAudio(audioData.blob, audioData.mimeType);
-      setResult(data as TranscriptionResponse);
+      const data = await transcribeAudio(audioSource);
+      setResult(data);
       setStatus('success');
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "An error occurred during transcription. Please try again.");
+      setError((typeof err === 'string' ? err : err?.message) || "An error occurred during transcription. Please try again.");
       setStatus('error');
     }
   };
 
   const handleReset = () => {
-    setAudioData(null);
+    setAudioSource(null);
     setResult(null);
     setStatus('idle');
     setError(null);
@@ -99,6 +120,13 @@ function App() {
               Powered by Gemini 3 Flash Preview
             </div>
             <button
+              onClick={() => setKeySettingsMode('manage')}
+              className="p-2 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              aria-label="Manage API Key"
+            >
+              <KeyRound size={20} />
+            </button>
+            <button
               onClick={toggleDarkMode}
               className="p-2 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500"
               aria-label="Toggle Dark Mode"
@@ -109,8 +137,16 @@ function App() {
         </div>
       </header>
 
+      {keySettingsMode && (
+        <ApiKeySettings
+          mode={keySettingsMode}
+          onClose={hasApiKey ? () => setKeySettingsMode(null) : undefined}
+          onSaved={refreshApiKeyStatus}
+        />
+      )}
+
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-10">
-        
+
         {/* Intro */}
         <div className="text-center mb-10">
           <h2 className="text-3xl font-bold text-slate-900 dark:text-white mb-4">
@@ -135,8 +171,8 @@ function App() {
             <button
                 onClick={() => { setMode('record'); handleReset(); }}
                 className={`flex-1 sm:flex-none flex items-center justify-center px-6 py-2.5 rounded-lg text-sm font-medium transition-all focus:outline-none focus:ring-2 focus:ring-offset-1 dark:focus:ring-offset-slate-900 focus:ring-indigo-500 ${
-                mode === 'record' 
-                    ? 'bg-indigo-600 text-white shadow-sm' 
+                mode === 'record'
+                    ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
                 disabled={status === 'processing'}
@@ -147,8 +183,8 @@ function App() {
             <button
                 onClick={() => { setMode('upload'); handleReset(); }}
                 className={`flex-1 sm:flex-none flex items-center justify-center px-6 py-2.5 rounded-lg text-sm font-medium transition-all focus:outline-none focus:ring-2 focus:ring-offset-1 dark:focus:ring-offset-slate-900 focus:ring-indigo-500 ${
-                mode === 'upload' 
-                    ? 'bg-indigo-600 text-white shadow-sm' 
+                mode === 'upload'
+                    ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
                 disabled={status === 'processing'}
@@ -161,7 +197,7 @@ function App() {
 
         {/* Main Content Area */}
         <div className="space-y-8">
-          
+
           {/* Input Section */}
           {!result && status !== 'processing' && (
             <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-6 sm:p-8 transition-colors duration-300">
@@ -171,10 +207,10 @@ function App() {
                 <FileUploader onFileSelected={handleAudioReady} disabled={status === 'processing'} />
               )}
 
-              {audioData && (
+              {audioSource && (
                 <div className="mt-6 flex justify-end pt-6 border-t border-slate-100 dark:border-slate-800">
-                  <Button 
-                    onClick={handleTranscribe} 
+                  <Button
+                    onClick={handleTranscribe}
                     isLoading={status === 'processing'}
                     className="w-full sm:w-auto"
                     icon={<Sparkles size={16} />}
@@ -218,8 +254,8 @@ function App() {
                       <Button onClick={handleCopyTranscript} variant="secondary" icon={copied ? <Check size={16} /> : <Copy size={16} />}>
                         {copied ? 'Copied!' : 'Copy Transcript'}
                       </Button>
-                      <PDFDownloadLink 
-                        document={<TranscriptPDF data={result} />} 
+                      <PDFDownloadLink
+                        document={<TranscriptPDF data={result} />}
                         fileName="transcript.pdf"
                         className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium transition-colors rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-1 dark:focus:ring-offset-slate-900 focus:ring-indigo-500 bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
                       >

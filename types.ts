@@ -15,6 +15,7 @@ export interface TranscriptionSegment {
   timestamp: string;
   content: string;
   language: string;
+  language_code?: string;
   translation?: string;
   emotion?: Emotion;
 }
@@ -26,8 +27,6 @@ export interface TranscriptionResponse {
 
 export type AppStatus = 'idle' | 'recording' | 'processing' | 'success' | 'error';
 
-export interface AudioData {
-  blob: Blob;
-  base64: string;
-  mimeType: string;
-}
+export type AudioSource =
+  | { kind: 'path'; path: string; name: string; mimeType: string }
+  | { kind: 'blob'; blob: Blob; name: string; mimeType: string };
