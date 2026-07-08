@@ -10,6 +10,14 @@ const MODEL_ID: &str = "gemini-3.5-flash";
 // Matches the chunk size used by Google's own @google/genai Node SDK.
 const MAX_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
+// Per-request timeouts. These are deliberately per-operation rather than a
+// single client-wide timeout: transcription (generateContent) legitimately
+// takes minutes for a real audio file, while uploads and polls should fail
+// fast so a stalled connection triggers a retry instead of hanging.
+const UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const GENERATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 const PROMPT: &str = r#"
 You are an expert audio transcription assistant.
 Process the provided audio file and generate a detailed transcription.
@@ -67,7 +75,13 @@ pub async fn transcribe(
     file_path: &Path,
     mime_type: &str,
 ) -> Result<TranscriptionResponse, GeminiError> {
-    let client = reqwest::Client::new();
+    // A fast connect timeout catches dead/unreachable connections quickly.
+    // Overall request bounds are applied per-operation (see the *_TIMEOUT
+    // constants) rather than client-wide, because transcription needs minutes
+    // while uploads/polls should fail fast and retry.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()?;
     let file_name = file_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -104,6 +118,7 @@ async fn upload_file(
 ) -> Result<Value, GeminiError> {
     let start_resp = client
         .post(format!("{BASE_URL}/upload/v1beta/files"))
+        .timeout(POLL_REQUEST_TIMEOUT)
         .header("x-goog-api-key", api_key)
         .header("Content-Type", "application/json")
         .header("X-Goog-Upload-Protocol", "resumable")
@@ -147,29 +162,54 @@ async fn upload_file(
         let is_last = offset + chunk_size >= file_size;
         let command = if is_last { "upload, finalize" } else { "upload" };
 
-        let resp = client
-            .post(&upload_url)
-            .header("X-Goog-Upload-Command", command)
-            .header("X-Goog-Upload-Offset", offset.to_string())
-            .header("Content-Length", chunk_size.to_string())
-            .header("X-Goog-Upload-File-Name", file_name)
-            .body(buf)
-            .send()
-            .await?;
+        const MAX_ATTEMPTS: u32 = 4;
+        let mut attempt = 0;
+        let (resp, status_header) = loop {
+            attempt += 1;
+            let result = client
+                .post(&upload_url)
+                .timeout(UPLOAD_REQUEST_TIMEOUT)
+                .header("X-Goog-Upload-Command", command)
+                .header("X-Goog-Upload-Offset", offset.to_string())
+                .header("Content-Length", chunk_size.to_string())
+                .header("X-Goog-Upload-File-Name", file_name)
+                .body(buf.clone())
+                .send()
+                .await;
 
-        let status_header = resp
-            .headers()
-            .get("x-goog-upload-status")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GeminiError::Api(format!(
-                "upload chunk failed ({status}): {body}"
-            )));
-        }
+            match result {
+                Ok(resp) => {
+                    let status_header = resp
+                        .headers()
+                        .get("x-goog-upload-status")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    // A missing status header on an otherwise-successful response
+                    // means the server didn't cleanly acknowledge the chunk — retry
+                    // rather than treating it as final/active.
+                    if resp.status().is_success() && status_header.is_some() {
+                        break (resp, status_header);
+                    }
+                    if attempt >= MAX_ATTEMPTS {
+                        if !resp.status().is_success() {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            return Err(GeminiError::Api(format!(
+                                "upload chunk failed ({status}): {body}"
+                            )));
+                        }
+                        break (resp, status_header);
+                    }
+                    tokio::time::sleep(Duration::from_secs(1u64 << (attempt - 1))).await;
+                }
+                Err(e) => {
+                    if attempt >= MAX_ATTEMPTS {
+                        return Err(GeminiError::Network(e));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1u64 << (attempt - 1))).await;
+                }
+            }
+        };
 
         offset += chunk_size;
 
@@ -201,6 +241,7 @@ async fn wait_for_active(
     loop {
         let resp = client
             .get(format!("{BASE_URL}/v1beta/{file_resource_name}"))
+            .timeout(POLL_REQUEST_TIMEOUT)
             .header("x-goog-api-key", api_key)
             .send()
             .await?;
@@ -284,10 +325,20 @@ async fn generate_content(
 
     let resp = client
         .post(format!("{BASE_URL}/v1beta/models/{MODEL_ID}:generateContent"))
+        .timeout(GENERATE_REQUEST_TIMEOUT)
         .header("x-goog-api-key", api_key)
         .json(&body)
         .send()
-        .await?;
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                GeminiError::Api(
+                    "Transcription timed out after 10 minutes. The audio may be too long — try a shorter clip.".into(),
+                )
+            } else {
+                GeminiError::Network(e)
+            }
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
