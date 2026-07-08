@@ -1,0 +1,20 @@
+name = "echoscript"
+main = "worker/index.ts"
+compatibility_date = "2026-07-07"
+
+[observability]
+enabled = true
+
+[[containers]]
+class_name = "EchoScriptContainer"
+image = "./Dockerfile"
+instance_type = "basic"
+max_instances = 3
+
+[[durable_objects.bindings]]
+class_name = "EchoScriptContainer"
+name = "ECHOSCRIPT_CONTAINER"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["EchoScriptContainer"]
